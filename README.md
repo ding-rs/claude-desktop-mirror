@@ -22,7 +22,9 @@ Each endpoint must remain on reviewed Anthropic hosts throughout its HTTPS redir
 
 ## Synchronization model
 
-The scheduled no-change check performs three one-byte HTTPS Range probes (`bytes=0-0`). If the source fingerprints have not changed, it downloads zero installer bodies and performs zero release writes.
+Scheduled synchronization is opt-in. The daily schedule is skipped unless the repository variable `MIRROR_SYNC_ENABLED` is exactly `true`; unset, empty, or any other value keeps it disabled. A manually dispatched workflow always runs, regardless of that variable. For initial setup, run and verify the workflow manually before setting `MIRROR_SYNC_ENABLED=true` under the repository's Actions variables. Unset the variable or set it to `false` to disable later scheduled runs without changing the workflow.
+
+Once enabled, the scheduled no-change check performs three one-byte HTTPS Range probes (`bytes=0-0`). If the source fingerprints have not changed, it downloads zero installer bodies and performs zero release writes.
 
 The observed upstream identity contract combines the canonical version, 40-hex filename identifier, exact size, and strong ETag. The 40-hex filename field is an opaque upstream identifier, not a claim that it is a SHA-256 digest. The strong ETag is an observed upstream contract and is required to remain stable from the Range probe through the full download.
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -699,7 +699,7 @@ test("all three changed assets download exact bytes and only MSIX files verify s
       });
     }
     assert.deepEqual(
-      signatures.map((path) => path.split("/").at(-1)),
+      signatures.map((path) => basename(path)),
       ["Claude-Windows-x64.msix", "Claude-Windows-arm64.msix"],
     );
   });
