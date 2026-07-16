@@ -480,7 +480,7 @@ function createAbsoluteBodyGuard(externalSignal, timeoutMs) {
   };
 }
 
-function normalizeJsonBodyError(error, guard, url) {
+function normalizeMetadataBodyError(error, guard, url) {
   if (guard?.externallyAborted) return abortError("metadata request", url);
   if (guard?.timedOut) return timeoutError("metadata body", url);
   if (error instanceof SanitizedOperationError) return error;
@@ -490,7 +490,7 @@ function normalizeJsonBodyError(error, guard, url) {
   );
 }
 
-async function readBoundedJsonBody(
+async function readBoundedTextBody(
   response,
   url,
   { bodyTimeoutMs, maxBytes, signal },
@@ -550,27 +550,30 @@ async function readBoundedJsonBody(
     });
   } catch (error) {
     await cancelBody(response);
-    throw normalizeJsonBodyError(error, guard, url);
+    throw normalizeMetadataBodyError(error, guard, url);
   } finally {
     guard.cleanup();
   }
 
   try {
-    return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(chunks, size),
+    );
   } catch {
     throw new SanitizedOperationError(
-      `metadata JSON is invalid for ${safeUrlForError(url)}`,
-      { code: "INVALID_JSON", retryable: true },
+      `metadata UTF-8 text is invalid for ${safeUrlForError(url)}`,
+      { code: "INVALID_UTF8", retryable: true },
     );
   }
 }
 
-export async function fetchJsonWithRetry(
+async function fetchMetadataWithRetry(
   fetchImpl,
   url,
   init = {},
   attempts = 3,
   options = {},
+  parseText,
 ) {
   assertAttempts(attempts);
   const headerTimeoutMs =
@@ -596,16 +599,32 @@ export async function fetchJsonWithRetry(
         allowedRedirectProtocols: options.allowedRedirectProtocols,
         maxRedirects: options.maxRedirects,
       });
-      return await readBoundedJsonBody(response, url, {
+      if (options.validateResponse !== undefined) {
+        if (typeof options.validateResponse !== "function") {
+          await cancelBody(response);
+          throw new TypeError("validateResponse must be a function");
+        }
+        try {
+          await options.validateResponse(response);
+        } catch {
+          await cancelBody(response);
+          throw new SanitizedOperationError(
+            `metadata response validation failed for ${safeUrlForError(url)}`,
+            { code: "RESPONSE_REJECTED" },
+          );
+        }
+      }
+      const text = await readBoundedTextBody(response, url, {
         bodyTimeoutMs,
         maxBytes,
         signal,
       });
+      return parseText(text, url);
     } catch (error) {
       lastError =
         error instanceof SanitizedOperationError
           ? error
-          : normalizeJsonBodyError(error, null, url);
+          : normalizeMetadataBodyError(error, null, url);
     }
 
     if (!lastError.retryable || attempt === attempts) break;
@@ -618,6 +637,49 @@ export async function fetchJsonWithRetry(
   }
 
   throw lastError;
+}
+
+export async function fetchTextWithRetry(
+  fetchImpl,
+  url,
+  init = {},
+  attempts = 3,
+  options = {},
+) {
+  return await fetchMetadataWithRetry(
+    fetchImpl,
+    url,
+    init,
+    attempts,
+    options,
+    (text) => text,
+  );
+}
+
+export async function fetchJsonWithRetry(
+  fetchImpl,
+  url,
+  init = {},
+  attempts = 3,
+  options = {},
+) {
+  return await fetchMetadataWithRetry(
+    fetchImpl,
+    url,
+    init,
+    attempts,
+    options,
+    (text, requestUrl) => {
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new SanitizedOperationError(
+          `metadata JSON is invalid for ${safeUrlForError(requestUrl)}`,
+          { code: "INVALID_JSON", retryable: true },
+        );
+      }
+    },
+  );
 }
 
 function parseAdvertisedLength(headers, maxBytes, url) {

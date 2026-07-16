@@ -106,6 +106,7 @@ function snapshotProbes(probes) {
         sourceFingerprint: candidate?.sourceFingerprint,
         resolvedUrl: candidate?.resolvedUrl,
         expectedSize: candidate?.expectedSize,
+        expectedSha256: candidate?.expectedSha256,
       }),
     );
   }

@@ -17,6 +17,8 @@ const EXPECTED_IDS = [
   "darwin-universal-dmg",
   "win32-x64-msix",
   "win32-arm64-msix",
+  "linux-x64-deb",
+  "linux-arm64-deb",
 ];
 
 const FINGERPRINTS = Object.fromEntries(
@@ -89,7 +91,12 @@ test("one changed source fingerprint changes only that asset", () => {
   assert.deepEqual(buildSyncPlan(makeManifest(), probes, EXPECTED_IDS), {
     hasChanges: true,
     changedIds: ["darwin-universal-dmg"],
-    unchangedIds: ["win32-x64-msix", "win32-arm64-msix"],
+    unchangedIds: [
+      "win32-x64-msix",
+      "win32-arm64-msix",
+      "linux-x64-deb",
+      "linux-arm64-deb",
+    ],
   });
 });
 
@@ -104,6 +111,8 @@ test("sync plan preserves probe order", () => {
     hasChanges: true,
     changedIds: ["darwin-universal-dmg"],
     unchangedIds: [
+      "linux-arm64-deb",
+      "linux-x64-deb",
       "win32-arm64-msix",
       "win32-x64-msix",
     ],

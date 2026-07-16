@@ -15,6 +15,8 @@ const EXPECTED_IDS = [
   "darwin-universal-dmg",
   "win32-x64-msix",
   "win32-arm64-msix",
+  "linux-x64-deb",
+  "linux-arm64-deb",
 ];
 
 function runOwnershipToken(env) {
@@ -51,9 +53,6 @@ function safeProbe(probe) {
     ...(probe.expectedSize === undefined
       ? {}
       : { expectedSize: probe.expectedSize }),
-    ...(probe.expectedEtag === undefined
-      ? {}
-      : { expectedEtag: probe.expectedEtag }),
   };
 }
 

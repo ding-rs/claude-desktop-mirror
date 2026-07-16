@@ -25,11 +25,15 @@ const EXPECTED_IDS = [
   "darwin-universal-dmg",
   "win32-x64-msix",
   "win32-arm64-msix",
+  "linux-x64-deb",
+  "linux-arm64-deb",
 ];
 const FILENAMES = {
   "darwin-universal-dmg": "Claude-macOS-universal.dmg",
   "win32-x64-msix": "Claude-Windows-x64.msix",
   "win32-arm64-msix": "Claude-Windows-arm64.msix",
+  "linux-x64-deb": "Claude-Linux-x64.deb",
+  "linux-arm64-deb": "Claude-Linux-arm64.deb",
 };
 const NOW = new Date("2026-07-16T01:02:03.000Z");
 
@@ -80,6 +84,7 @@ function probes({ changedId, reverse = false, runtimeFields = false } = {}) {
       ? {
           resolvedUrl: `https://signed.example/${id}?token=secret`,
           expectedSize: 123,
+          expectedSha256: "a".repeat(64),
           path: "/untrusted/path",
           arbitraryRuntimeField: "must-not-survive",
         }
@@ -130,6 +135,9 @@ function fixture(
     async stageChanged(probe, destination) {
       events.push(`stageChanged:${probe.id}`);
       if (stageFailure === probe.id) throw new Error("stage failed");
+      if (runtimeFields) {
+        assert.equal(probe.expectedSha256, "a".repeat(64));
+      }
       return stageBytes(destination, bytesFor(probe.id, "new"));
     },
   };
@@ -295,6 +303,7 @@ test("probe getters are read once into an immutable plain snapshot", async () =>
         "sourceFingerprint",
         "resolvedUrl",
         "expectedSize",
+        "expectedSha256",
       ]) {
         const key = `${value.id}:${field}`;
         Object.defineProperty(result, field, {
@@ -310,7 +319,7 @@ test("probe getters are read once into an immutable plain snapshot", async () =>
     const setup = fixture(root, { previous: null, probeOverride });
     await synchronize(setup.args);
     assert.ok([...reads.values()].every((count) => count === 1));
-    assert.equal(reads.size, EXPECTED_IDS.length * 6);
+    assert.equal(reads.size, EXPECTED_IDS.length * 7);
   });
 });
 
@@ -325,6 +334,8 @@ test("first run stages every upstream asset then publishes", async () => {
       "stageChanged:darwin-universal-dmg",
       "stageChanged:win32-x64-msix",
       "stageChanged:win32-arm64-msix",
+      "stageChanged:linux-x64-deb",
+      "stageChanged:linux-arm64-deb",
       "writeMetadata",
       "createDraft",
       "uploadAll",
@@ -341,7 +352,9 @@ test("one changed asset reuses the previous release for the rest in probe order"
       reverse: true,
     });
     await synchronize(args);
-    assert.deepEqual(events.slice(2, 5), [
+    assert.deepEqual(events.slice(2, 7), [
+      "stagePrevious:linux-arm64-deb",
+      "stagePrevious:linux-x64-deb",
       "stagePrevious:win32-arm64-msix",
       "stagePrevious:win32-x64-msix",
       "stageChanged:darwin-universal-dmg",
@@ -555,7 +568,10 @@ test("manifest is stable, explicitly allowlisted, and strips every runtime field
       ]);
     }
     const serialized = JSON.stringify(manifest);
-    assert.doesNotMatch(serialized, /resolvedUrl|expectedSize|path|arbitraryRuntimeField|secret/);
+    assert.doesNotMatch(
+      serialized,
+      /resolvedUrl|expectedSize|expectedSha256|path|arbitraryRuntimeField|secret/,
+    );
   });
 });
 
@@ -1196,6 +1212,13 @@ test("probe-only accepts pnpm's separator, emits only safe fields, and never inv
   const output = [];
   let executableCalls = 0;
   const contentId = "a".repeat(40);
+  const expectedIds = [
+    "darwin-universal-dmg",
+    "win32-x64-msix",
+    "win32-arm64-msix",
+    "linux-x64-deb",
+    "linux-arm64-deb",
+  ];
   const finalPaths = new Map([
     ["darwin/universal/dmg", `Claude-${contentId}.dmg`],
     ["win32/x64/msix", `Claude-${contentId}.msix`],
@@ -1204,6 +1227,32 @@ test("probe-only accepts pnpm's separator, emits only safe fields, and never inv
   const fetchImpl = async (url, init = {}) => {
     const requestUrl = String(url);
     assert.equal(init.method, "GET");
+    assert.equal(init.redirect, "manual");
+    if (requestUrl.includes("/claude-desktop/apt/")) {
+      assert.equal(new Headers(init.headers).get("range"), null);
+      const architecture = requestUrl.includes("binary-amd64")
+        ? "amd64"
+        : "arm64";
+      const version = architecture === "amd64" ? "1.2.4" : "1.2.5";
+      const checksum = architecture === "amd64" ? "c".repeat(64) : "d".repeat(64);
+      const filename = `pool/main/c/claude-desktop/claude-desktop_${version}_${architecture}.deb`;
+      const body = [
+        "Package: claude-desktop",
+        `Version: ${version}`,
+        `Architecture: ${architecture}`,
+        `Filename: ${filename}`,
+        "Size: 12345",
+        `SHA256: ${checksum}`,
+        "",
+      ].join("\n");
+      const response = new Response(body, {
+        status: 200,
+        headers: { "content-length": String(Buffer.byteLength(body)) },
+      });
+      Object.defineProperty(response, "url", { value: requestUrl });
+      return response;
+    }
+
     assert.equal(new Headers(init.headers).get("range"), "bytes=0-0");
     const entry = [...finalPaths].find(([needle]) => requestUrl.includes(needle));
     assert.ok(entry, "request must use one canonical Claude source endpoint");
@@ -1237,8 +1286,20 @@ test("probe-only accepts pnpm's separator, emits only safe fields, and never inv
   assert.equal(output.length, 1);
   const serialized = output[0];
   const values = JSON.parse(serialized);
-  assert.equal(values.length, 3);
-  assert.ok(values.every((value) => Object.hasOwn(value, "sourceFingerprint")));
-  assert.ok(values.every((value) => value.expectedEtag === `"${"b".repeat(32)}"`));
-  assert.doesNotMatch(serialized, /resolvedUrl|signed-secret|token=/i);
+  assert.deepEqual(values.map((value) => value.id), expectedIds);
+  for (const value of values) {
+    assert.deepEqual(Object.keys(value), [
+      "id",
+      "filename",
+      "sourceEndpoint",
+      "sourceFingerprint",
+      "expectedSize",
+    ]);
+  }
+  assert.match(values[3].sourceFingerprint, /^version:1\.2\.4\|file:.*\|size:12345\|sha256:c{64}$/);
+  assert.match(values[4].sourceFingerprint, /^version:1\.2\.5\|file:.*\|size:12345\|sha256:d{64}$/);
+  assert.doesNotMatch(
+    serialized,
+    /resolvedUrl|expectedEtag|expectedSha256|signed-secret|token=/i,
+  );
 });
