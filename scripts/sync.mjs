@@ -18,6 +18,12 @@ const EXPECTED_IDS = [
   "linux-x64-deb",
   "linux-arm64-deb",
 ];
+const LEGACY_EXPECTED_IDS = [
+  "darwin-universal-dmg",
+  "win32-x64-msix",
+  "win32-arm64-msix",
+];
+const COMPATIBLE_PREVIOUS_ID_SETS = [LEGACY_EXPECTED_IDS];
 
 function runOwnershipToken(env) {
   const runId = env.GITHUB_RUN_ID;
@@ -105,6 +111,7 @@ export async function main({
     const result = await synchronize({
       product: "claude-desktop",
       expectedIds: EXPECTED_IDS,
+      compatiblePreviousIdSets: COMPATIBLE_PREVIOUS_ID_SETS,
       now: new Date(),
       workDir,
       source,

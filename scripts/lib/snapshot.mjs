@@ -27,14 +27,83 @@ function assertExpectedIds(expectedIds) {
   }
 }
 
-function assertExactUniqueIds(items, expectedIds, label) {
-  assertArray(items, label);
+function uniqueExpectedIdSet(expectedIds) {
   assertExpectedIds(expectedIds);
-
   const expectedSet = new Set(expectedIds);
   if (expectedSet.size !== expectedIds.length) {
     throw new Error("expectedIds logical IDs must be unique");
   }
+  return expectedSet;
+}
+
+function codeUnitCompare(left, right) {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+export function assertCompatiblePreviousIdSets(
+  compatiblePreviousIdSets = [],
+  expectedIds,
+) {
+  assertArray(compatiblePreviousIdSets, "compatiblePreviousIdSets");
+  const expectedSet = uniqueExpectedIdSet(expectedIds);
+  const seenSets = new Set();
+  const validated = [];
+  for (
+    let setIndex = 0;
+    setIndex < compatiblePreviousIdSets.length;
+    setIndex += 1
+  ) {
+    if (!Object.hasOwn(compatiblePreviousIdSets, setIndex)) {
+      throw new Error("compatiblePreviousIdSets must not be sparse");
+    }
+    const ids = compatiblePreviousIdSets[setIndex];
+    assertArray(ids, `compatiblePreviousIdSets[${setIndex}]`);
+    if (ids.length === 0) {
+      throw new Error("compatible previous ID sets must be non-empty");
+    }
+    const idSet = new Set();
+    for (let idIndex = 0; idIndex < ids.length; idIndex += 1) {
+      const id = ids[idIndex];
+      if (
+        !Object.hasOwn(ids, idIndex) ||
+        typeof id !== "string" ||
+        id.trim().length === 0
+      ) {
+        throw new Error(
+          "compatible previous ID sets must contain exact non-empty strings",
+        );
+      }
+      if (idSet.has(id)) {
+        throw new Error("compatible previous ID sets must contain unique IDs");
+      }
+      if (!expectedSet.has(id)) {
+        throw new Error(
+          "compatible previous ID sets must not contain unknown IDs",
+        );
+      }
+      idSet.add(id);
+    }
+    if (idSet.size >= expectedSet.size) {
+      throw new Error(
+        "compatible previous ID sets must be strict subsets of expectedIds",
+      );
+    }
+    const key = JSON.stringify([...idSet].sort(codeUnitCompare));
+    if (seenSets.has(key)) {
+      throw new Error(
+        "compatible previous ID sets must not contain duplicate sets",
+      );
+    }
+    seenSets.add(key);
+    validated.push([...ids]);
+  }
+  return validated;
+}
+
+function assertExactUniqueIds(items, expectedIds, label) {
+  assertArray(items, label);
+  const expectedSet = uniqueExpectedIdSet(expectedIds);
 
   const actualSet = new Set();
   for (const item of items) {
@@ -57,6 +126,29 @@ function assertExactUniqueIds(items, expectedIds, label) {
         ` extra: ${extra.join(", ") || "none"})`,
     );
   }
+}
+
+function matchExactPreviousIds(items, expectedIds, compatiblePreviousIdSets) {
+  assertArray(items, "manifest asset");
+  const candidates = [[...expectedIds], ...compatiblePreviousIdSets];
+  const actualSet = new Set();
+  for (const item of items) {
+    const id = item?.id;
+    if (actualSet.has(id)) {
+      throw new Error(`duplicate manifest asset id: ${String(id)}`);
+    }
+    actualSet.add(id);
+  }
+  const matched = candidates.find((ids) => {
+    if (ids.length !== actualSet.size) return false;
+    return ids.every((id) => actualSet.has(id));
+  });
+  if (matched === undefined) {
+    throw new Error(
+      "manifest asset ids do not match current or compatible asset IDs",
+    );
+  }
+  return matched;
 }
 
 function assertSourceFingerprint(asset) {
@@ -117,9 +209,17 @@ function assertSourceEndpoint(asset) {
   }
 }
 
-export function assertPreviousManifest(manifest, expectedIds) {
+export function assertPreviousManifest(
+  manifest,
+  expectedIds,
+  compatiblePreviousIdSets = [],
+) {
+  const validatedCompatibleSets = assertCompatiblePreviousIdSets(
+    compatiblePreviousIdSets,
+    expectedIds,
+  );
   if (manifest === null) {
-    return;
+    return null;
   }
   if (typeof manifest !== "object" || manifest === undefined) {
     throw new TypeError("manifest must be an object or null");
@@ -130,7 +230,11 @@ export function assertPreviousManifest(manifest, expectedIds) {
     );
   }
 
-  assertExactUniqueIds(manifest.assets, expectedIds, "manifest asset");
+  const matchedIds = matchExactPreviousIds(
+    manifest.assets,
+    expectedIds,
+    validatedCompatibleSets,
+  );
   const filenames = new Set();
   for (const asset of manifest.assets) {
     assertUniqueFilename(asset, filenames);
@@ -139,11 +243,12 @@ export function assertPreviousManifest(manifest, expectedIds) {
     assertAssetSize(asset);
     assertSha256(asset);
   }
+  return matchedIds;
 }
 
 export function assertPublishedManifestEnvelope(
   manifest,
-  { expectedIds, product, tag },
+  { expectedIds, compatiblePreviousIdSets = [], product, tag },
 ) {
   if (typeof product !== "string" || product.trim().length === 0) {
     throw new Error("product must be a non-empty string");
@@ -151,7 +256,11 @@ export function assertPublishedManifestEnvelope(
   if (typeof tag !== "string" || tag.length === 0) {
     throw new Error("published release tag must be a non-empty string");
   }
-  assertPreviousManifest(manifest, expectedIds);
+  const matchedIds = assertPreviousManifest(
+    manifest,
+    expectedIds,
+    compatiblePreviousIdSets,
+  );
   if (manifest.product !== product) {
     throw new Error("published manifest product does not match product");
   }
@@ -183,14 +292,24 @@ export function assertPublishedManifestEnvelope(
       "published release tag does not match generatedAt and manifestDigest",
     );
   }
+  return matchedIds;
 }
 
-export function buildSyncPlan(previousManifest, probes, expectedIds) {
+export function buildSyncPlan(
+  previousManifest,
+  probes,
+  expectedIds,
+  compatiblePreviousIdSets = [],
+) {
   assertExactUniqueIds(probes, expectedIds, "probe");
   for (const probe of probes) {
     assertSourceFingerprint(probe);
   }
-  assertPreviousManifest(previousManifest, expectedIds);
+  assertPreviousManifest(
+    previousManifest,
+    expectedIds,
+    compatiblePreviousIdSets,
+  );
 
   const previousAssets = new Map(
     (previousManifest?.assets ?? []).map((asset) => [asset.id, asset]),

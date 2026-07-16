@@ -20,6 +20,7 @@ const EXPECTED_IDS = [
   "linux-x64-deb",
   "linux-arm64-deb",
 ];
+const LEGACY_IDS = EXPECTED_IDS.slice(0, 3);
 
 const FINGERPRINTS = Object.fromEntries(
   EXPECTED_IDS.map((id, index) => [id, `fingerprint-${index + 1}`]),
@@ -48,6 +49,13 @@ function makeManifest() {
     schemaVersion: SCHEMA_VERSION,
     product: "Claude Desktop",
     assets: makeAssets(),
+  };
+}
+
+function makeLegacyManifest() {
+  return {
+    ...makeManifest(),
+    assets: makeAssets().filter((asset) => LEGACY_IDS.includes(asset.id)),
   };
 }
 
@@ -81,6 +89,71 @@ test("matching source fingerprints mark every probe unchanged", () => {
     changedIds: [],
     unchangedIds: EXPECTED_IDS,
   });
+});
+
+test("explicit legacy snapshot compatibility reuses three matching assets and changes only two Linux assets", () => {
+  assert.deepEqual(
+    buildSyncPlan(
+      makeLegacyManifest(),
+      makeProbes(),
+      EXPECTED_IDS,
+      [LEGACY_IDS],
+    ),
+    {
+      hasChanges: true,
+      changedIds: ["linux-x64-deb", "linux-arm64-deb"],
+      unchangedIds: LEGACY_IDS,
+    },
+  );
+});
+
+test("snapshot compatibility rejects unconfigured subsets and invalid compatible ID sets", () => {
+  assert.throws(
+    () => buildSyncPlan(makeLegacyManifest(), makeProbes(), EXPECTED_IDS),
+    /manifest asset id/i,
+  );
+
+  const arbitrarySubset = {
+    ...makeManifest(),
+    assets: makeAssets().slice(0, 2),
+  };
+  assert.throws(
+    () =>
+      buildSyncPlan(
+        arbitrarySubset,
+        makeProbes(),
+        EXPECTED_IDS,
+        [LEGACY_IDS],
+      ),
+    /manifest asset id/i,
+  );
+
+  const sparseSet = new Array(1);
+  const invalidCompatibilitySets = [
+    null,
+    {},
+    ["not-an-id-set"],
+    [[]],
+    [sparseSet],
+    [[LEGACY_IDS[0], LEGACY_IDS[0]]],
+    [[LEGACY_IDS[0], ""]],
+    [[...LEGACY_IDS, "unknown-id"]],
+    [[...EXPECTED_IDS]],
+    [LEGACY_IDS, [...LEGACY_IDS]],
+    [LEGACY_IDS, [...LEGACY_IDS].reverse()],
+  ];
+  for (const compatiblePreviousIdSets of invalidCompatibilitySets) {
+    assert.throws(
+      () =>
+        buildSyncPlan(
+          makeManifest(),
+          makeProbes(),
+          EXPECTED_IDS,
+          compatiblePreviousIdSets,
+        ),
+      /compatible|ID set|subset|duplicate|array|unique|unknown|non-empty/i,
+    );
+  }
 });
 
 test("one changed source fingerprint changes only that asset", () => {

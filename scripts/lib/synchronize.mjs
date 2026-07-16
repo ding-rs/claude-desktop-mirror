@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   SCHEMA_VERSION,
+  assertCompatiblePreviousIdSets,
   assertPublishedManifestEnvelope,
   assertStagedAssets,
   buildSyncPlan,
@@ -62,6 +63,7 @@ function assertMethods(value, methods, label) {
 function validateInputs({
   product,
   expectedIds,
+  compatiblePreviousIdSets,
   now,
   workDir,
   source,
@@ -78,6 +80,10 @@ function validateInputs({
     throw new Error("now must be a valid Date");
   }
   assertNonEmptyUniqueIds(expectedIds);
+  const validatedCompatibleSets = assertCompatiblePreviousIdSets(
+    compatiblePreviousIdSets,
+    expectedIds,
+  );
   if (typeof workDir !== "string" || workDir.length === 0) {
     throw new Error("workDir must be a non-empty string");
   }
@@ -86,6 +92,9 @@ function validateInputs({
   }
   assertMethods(source, REQUIRED_SOURCE_METHODS, "source");
   assertMethods(releases, REQUIRED_RELEASE_METHODS, "releases");
+  return Object.freeze(
+    validatedCompatibleSets.map((ids) => Object.freeze(ids)),
+  );
 }
 
 function snapshotProbes(probes) {
@@ -154,7 +163,12 @@ function stableAsset(probe, measured, destination) {
   };
 }
 
-function assertPreviousSnapshot(previous, product, expectedIds) {
+function assertPreviousSnapshot(
+  previous,
+  product,
+  expectedIds,
+  compatiblePreviousIdSets,
+) {
   if (previous === null) return;
   if (
     !previous ||
@@ -163,8 +177,9 @@ function assertPreviousSnapshot(previous, product, expectedIds) {
   ) {
     throw new Error("previous release tag and manifest are required");
   }
-  assertPublishedManifestEnvelope(previous.manifest, {
+  return assertPublishedManifestEnvelope(previous.manifest, {
     expectedIds,
+    compatiblePreviousIdSets,
     product,
     tag: previous.tag,
   });
@@ -219,15 +234,17 @@ async function cleanupAfterFailure(releases, tag, operationError) {
 export async function synchronize({
   product,
   expectedIds,
+  compatiblePreviousIdSets = [],
   now,
   workDir,
   source,
   releases,
   logger = () => {},
 }) {
-  validateInputs({
+  const validatedCompatibleSets = validateInputs({
     product,
     expectedIds,
+    compatiblePreviousIdSets,
     now,
     workDir,
     source,
@@ -239,8 +256,16 @@ export async function synchronize({
     throw new Error("workDir must be empty before synchronization");
   }
 
-  const previous = await releases.readLatestManifest(expectedIds);
-  assertPreviousSnapshot(previous, product, expectedIds);
+  const previous = await releases.readLatestManifest(
+    expectedIds,
+    validatedCompatibleSets,
+  );
+  assertPreviousSnapshot(
+    previous,
+    product,
+    expectedIds,
+    validatedCompatibleSets,
+  );
   logger("probe");
   const currentProbes = snapshotProbes(await source.probe());
   logger("compare");
@@ -248,6 +273,7 @@ export async function synchronize({
     previous?.manifest ?? null,
     currentProbes,
     expectedIds,
+    validatedCompatibleSets,
   );
   assertSafeProbeContract(currentProbes);
   if (!plan.hasChanges) return { status: "no-changes" };

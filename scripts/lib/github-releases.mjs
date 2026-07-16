@@ -339,7 +339,8 @@ export function createGitHubReleaseAdapter({
   }
 
   return {
-    async readLatestManifest(expectedIds) {
+    async readLatestManifest(expectedIds, compatiblePreviousIdSets = []) {
+      assertPreviousManifest(null, expectedIds, compatiblePreviousIdSets);
       let tag;
       try {
         tag = await viewLatestTag();
@@ -360,7 +361,11 @@ export function createGitHubReleaseAdapter({
           await readFile(path, "utf8"),
           "latest manifest",
         );
-        assertPreviousManifest(manifest, expectedIds);
+        assertPreviousManifest(
+          manifest,
+          expectedIds,
+          compatiblePreviousIdSets,
+        );
         return { tag, manifest };
       } finally {
         await rm(directory, { recursive: true, force: true });

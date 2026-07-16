@@ -28,6 +28,7 @@ const EXPECTED_IDS = [
   "linux-x64-deb",
   "linux-arm64-deb",
 ];
+const LEGACY_IDS = EXPECTED_IDS.slice(0, 3);
 const FILENAMES = {
   "darwin-universal-dmg": "Claude-macOS-universal.dmg",
   "win32-x64-msix": "Claude-Windows-x64.msix",
@@ -57,10 +58,10 @@ function assetFor(id, version = "old") {
   };
 }
 
-function matchingManifest() {
+function manifestForIds(ids) {
   const product = "claude-desktop";
   const generatedAt = "2026-07-15T01:02:03.000Z";
-  const assets = EXPECTED_IDS.map((id) => assetFor(id));
+  const assets = ids.map((id) => assetFor(id));
   const manifestDigest = createManifestDigest(product, assets);
   const releaseTag = createReleaseTag(new Date(generatedAt), manifestDigest);
   return {
@@ -71,6 +72,14 @@ function matchingManifest() {
     manifestDigest,
     assets,
   };
+}
+
+function matchingManifest() {
+  return manifestForIds(EXPECTED_IDS);
+}
+
+function legacyManifest() {
+  return manifestForIds(LEGACY_IDS);
 }
 
 function probes({ changedId, reverse = false, runtimeFields = false } = {}) {
@@ -126,6 +135,7 @@ function fixture(
   } = {},
 ) {
   const events = [];
+  const readLatestCalls = [];
   const workDir = join(root, "work");
   const source = {
     async probe() {
@@ -142,13 +152,14 @@ function fixture(
     },
   };
   const releases = {
-    async readLatestManifest() {
+    async readLatestManifest(...args) {
       events.push("readLatest");
+      readLatestCalls.push(args);
       return previous;
     },
     async stagePrevious(tag, previousAsset, destination) {
       events.push(`stagePrevious:${previousAsset.id}`);
-      assert.equal(tag, matchingManifest().releaseTag);
+      assert.equal(tag, previous.tag);
       return stageBytes(destination, bytesFor(previousAsset.id));
     },
     async writeMetadata(_workDir, manifest, staged) {
@@ -200,16 +211,80 @@ function fixture(
       releases,
     },
     events,
+    readLatestCalls,
     workDir,
   };
 }
 
 test("no-change exits before binary staging and release writes", async () => {
   await withTempDir(async (root) => {
-    const { args, events } = fixture(root);
+    const { args, events, readLatestCalls } = fixture(root);
     const result = await synchronize(args);
     assert.deepEqual(result, { status: "no-changes" });
     assert.deepEqual(events, ["readLatest", "probe"]);
+    assert.deepEqual(readLatestCalls, [[EXPECTED_IDS, []]]);
+  });
+});
+
+test("legacy three-asset migration reuses exactly three assets and downloads only two DEBs", async () => {
+  await withTempDir(async (root) => {
+    const manifest = legacyManifest();
+    const previous = { tag: manifest.releaseTag, manifest };
+    const setup = fixture(root, { previous });
+    setup.args.compatiblePreviousIdSets = [LEGACY_IDS];
+
+    const result = await synchronize(setup.args);
+
+    assert.equal(result.status, "published");
+    assert.deepEqual(setup.readLatestCalls, [[EXPECTED_IDS, [LEGACY_IDS]]]);
+    assert.deepEqual(setup.events, [
+      "readLatest",
+      "probe",
+      "stagePrevious:darwin-universal-dmg",
+      "stagePrevious:win32-x64-msix",
+      "stagePrevious:win32-arm64-msix",
+      "stageChanged:linux-x64-deb",
+      "stageChanged:linux-arm64-deb",
+      "writeMetadata",
+      "createDraft",
+      "uploadAll",
+      "verifyDraft",
+      "publishDraft",
+    ]);
+    assert.deepEqual(
+      result.manifest.assets.map((asset) => asset.id).sort(),
+      [...EXPECTED_IDS].sort(),
+    );
+    for (const asset of result.manifest.assets) {
+      const version = LEGACY_IDS.includes(asset.id) ? "old" : "new";
+      assert.equal(asset.sha256, sha256(bytesFor(asset.id, version)));
+    }
+  });
+});
+
+test("corrupt compatible legacy envelopes fail before probing", async () => {
+  await withTempDir(async (root) => {
+    for (const mutate of [
+      (manifest) => {
+        manifest.product = "other-product";
+      },
+      (manifest) => {
+        manifest.manifestDigest = "0".repeat(64);
+      },
+    ]) {
+      const manifest = structuredClone(legacyManifest());
+      mutate(manifest);
+      const setup = fixture(root, {
+        previous: { tag: manifest.releaseTag, manifest },
+      });
+      setup.args.compatiblePreviousIdSets = [LEGACY_IDS];
+      await assert.rejects(
+        synchronize(setup.args),
+        /product|manifestDigest/i,
+      );
+      assert.deepEqual(setup.events, ["readLatest"]);
+      await rm(setup.workDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -258,6 +333,10 @@ test("invalid synchronize inputs fail before mkdir, remote, or source I/O", asyn
       { now: new Date(Number.NaN) },
       { expectedIds: [EXPECTED_IDS[0], EXPECTED_IDS[0]] },
       { expectedIds: ["", ...EXPECTED_IDS.slice(1)] },
+      { compatiblePreviousIdSets: null },
+      { compatiblePreviousIdSets: [[]] },
+      { compatiblePreviousIdSets: [[...EXPECTED_IDS]] },
+      { compatiblePreviousIdSets: [LEGACY_IDS, [...LEGACY_IDS].reverse()] },
       { workDir: 42 },
       { logger: null },
       { source: {} },
@@ -283,7 +362,7 @@ test("invalid synchronize inputs fail before mkdir, remote, or source I/O", asyn
       };
       await assert.rejects(
         synchronize({ ...base, workDir, source, releases, ...changes }),
-        /product|now|expectedIds|workDir|logger|source|releases|method/i,
+        /product|now|expectedIds|compatible|ID set|subset|workDir|logger|source|releases|method/i,
       );
       assert.deepEqual(events, []);
       await assert.rejects(access(workDir));
@@ -660,6 +739,37 @@ test("GitHub adapter reads latest tag and downloads exactly manifest.json", asyn
   assert.ok(fake.calls.every((call) => call.file === "gh"));
   assert.ok(fake.calls.every((call) => call.options.env.GH_TOKEN === "top-secret-token"));
   assert.doesNotMatch(JSON.stringify(fake.calls.map((call) => call.args)), /top-secret-token/);
+});
+
+test("GitHub adapter reads an exact legacy manifest only with explicit compatibility", async () => {
+  const manifest = legacyManifest();
+  const fake = fakeExec(async (_file, args) => {
+    if (args[1] === "view") {
+      return {
+        stdout: JSON.stringify({ tagName: manifest.releaseTag }),
+        stderr: "",
+      };
+    }
+    if (args[1] === "download") {
+      const output = args[args.indexOf("--output") + 1];
+      await writeFile(output, `${JSON.stringify(manifest)}\n`);
+      return { stdout: "", stderr: "" };
+    }
+  });
+  const adapter = createGitHubReleaseAdapter({
+    repo: "ding-rs/claude-desktop-mirror",
+    token: "token",
+    execFileImpl: fake.execFileImpl,
+  });
+
+  await assert.rejects(
+    adapter.readLatestManifest(EXPECTED_IDS),
+    /manifest asset id/i,
+  );
+  assert.deepEqual(
+    await adapter.readLatestManifest(EXPECTED_IDS, [LEGACY_IDS]),
+    { tag: manifest.releaseTag, manifest },
+  );
 });
 
 test("stagePrevious verifies real size and SHA256 and removes mismatches", async () => {
