@@ -10,7 +10,10 @@ import {
   parseClaudeVersion,
   probeClaudeAssets,
 } from "../scripts/lib/claude-sources.mjs";
-import { fetchJsonWithRetry } from "../scripts/lib/http.mjs";
+import {
+  fetchJsonWithRetry,
+  fetchTextWithRetry,
+} from "../scripts/lib/http.mjs";
 
 const MAX_ASSET_SIZE = 2 * 1024 ** 3;
 const CONTENT_ID = "a".repeat(40);
@@ -299,6 +302,64 @@ test("bounded JSON metadata parsing remains unchanged when the reader is shared 
     }),
     (error) => {
       assert.match(error.message, /metadata exceeds 10 bytes/i);
+      assert.doesNotMatch(error.message, /token=secret/i);
+      return true;
+    },
+  );
+});
+
+test("bounded JSON metadata preserves replacement decoding for malformed UTF-8 bytes", async () => {
+  const url = "https://example.test/metadata?token=secret";
+  const bytes = Buffer.concat([
+    Buffer.from('{"value":"'),
+    Buffer.from([0xff]),
+    Buffer.from('"}'),
+  ]);
+  const fetchImpl = async () => responseWithUrl(bytes, {
+    status: 200,
+    headers: { "content-length": String(bytes.length) },
+  }, url);
+
+  assert.deepEqual(
+    await fetchJsonWithRetry(fetchImpl, url, {}, 1, { backoffBaseMs: 0 }),
+    { value: "\ufffd" },
+  );
+});
+
+test("bounded JSON metadata preserves a leading UTF-8 BOM and rejects it as sanitized INVALID_JSON", async () => {
+  const url = "https://example.test/metadata?token=secret";
+  const bytes = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from('{"ok":true}'),
+  ]);
+  const fetchImpl = async () => responseWithUrl(bytes, {
+    status: 200,
+    headers: { "content-length": String(bytes.length) },
+  }, url);
+
+  await assert.rejects(
+    fetchJsonWithRetry(fetchImpl, url, {}, 1, { backoffBaseMs: 0 }),
+    (error) => {
+      assert.equal(error.code, "INVALID_JSON");
+      assert.match(error.message, /metadata JSON is invalid/i);
+      assert.doesNotMatch(error.message, /token=secret/i);
+      return true;
+    },
+  );
+});
+
+test("bounded UTF-8 text metadata still rejects malformed bytes fatally", async () => {
+  const url = "https://example.test/metadata?token=secret";
+  const bytes = Buffer.from([0xff]);
+  const fetchImpl = async () => responseWithUrl(bytes, {
+    status: 200,
+    headers: { "content-length": "1" },
+  }, url);
+
+  await assert.rejects(
+    fetchTextWithRetry(fetchImpl, url, {}, 1, { backoffBaseMs: 0 }),
+    (error) => {
+      assert.equal(error.code, "INVALID_UTF8");
       assert.doesNotMatch(error.message, /token=secret/i);
       return true;
     },

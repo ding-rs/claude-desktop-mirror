@@ -490,7 +490,7 @@ function normalizeMetadataBodyError(error, guard, url) {
   );
 }
 
-async function readBoundedTextBody(
+async function readBoundedBody(
   response,
   url,
   { bodyTimeoutMs, maxBytes, signal },
@@ -555,16 +555,7 @@ async function readBoundedTextBody(
     guard.cleanup();
   }
 
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(
-      Buffer.concat(chunks, size),
-    );
-  } catch {
-    throw new SanitizedOperationError(
-      `metadata UTF-8 text is invalid for ${safeUrlForError(url)}`,
-      { code: "INVALID_UTF8", retryable: true },
-    );
-  }
+  return Buffer.concat(chunks, size);
 }
 
 async function fetchMetadataWithRetry(
@@ -573,7 +564,7 @@ async function fetchMetadataWithRetry(
   init = {},
   attempts = 3,
   options = {},
-  parseText,
+  parseBody,
 ) {
   assertAttempts(attempts);
   const headerTimeoutMs =
@@ -614,12 +605,12 @@ async function fetchMetadataWithRetry(
           );
         }
       }
-      const text = await readBoundedTextBody(response, url, {
+      const body = await readBoundedBody(response, url, {
         bodyTimeoutMs,
         maxBytes,
         signal,
       });
-      return parseText(text, url);
+      return parseBody(body, url);
     } catch (error) {
       lastError =
         error instanceof SanitizedOperationError
@@ -652,7 +643,16 @@ export async function fetchTextWithRetry(
     init,
     attempts,
     options,
-    (text) => text,
+    (body, requestUrl) => {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(body);
+      } catch {
+        throw new SanitizedOperationError(
+          `metadata UTF-8 text is invalid for ${safeUrlForError(requestUrl)}`,
+          { code: "INVALID_UTF8", retryable: true },
+        );
+      }
+    },
   );
 }
 
@@ -669,9 +669,9 @@ export async function fetchJsonWithRetry(
     init,
     attempts,
     options,
-    (text, requestUrl) => {
+    (body, requestUrl) => {
       try {
-        return JSON.parse(text);
+        return JSON.parse(body.toString("utf8"));
       } catch {
         throw new SanitizedOperationError(
           `metadata JSON is invalid for ${safeUrlForError(requestUrl)}`,
